@@ -1,0 +1,63 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "Install Phase - if you need additional package, add it in this stage"
+  pre_build:
+      commands:
+        # Get private key from AWS secret manager and update config file
+        - aws secretsmanager get-secret-value --secret-id $GITHUB_SSH_KEY_SECRET --query 'SecretString' --region $AWS_REGION --output text > ~/.ssh/id_ecdsa 
+        - chmod 400 ~/.ssh/id_ecdsa
+        - echo -e "Host github.com\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
+        - git config --global core.sshCommand "ssh -i ~/.ssh/id_ecdsa"
+        # Check AWS CLI Version        
+        - echo "Checking AWS CLI Version..."
+        - aws --version
+        # Login to ECR Registry 
+        - echo "Login in to Amazon ECR Registry"
+        - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+        
+  build:
+    commands:
+      - git clone $GITHUB_SSH_URL -b $GITHUB_BRANCH
+      # Building Docker Image
+      - echo "Docker build started on `date`"
+      - echo "Building the Docker image..."
+      - cd /codebuild/output/src*/src/DataRunnerECS-POC/
+      - date1=$(git log -1 --format="%at" | xargs -I{} date -d @{} +%Y-%m-%d\ %H:%M:%S)
+      - date2=$(date +%Y-%m-%d\ %H:%M:%S)
+      - echo $date1
+      - echo $date2
+      - diff=$(( $(date -d "$date2" +%s) - $(date -d "$date1" +%s) ))
+      - echo $diff
+      - diff_in_hour=$(( $diff / 3600 ))
+      - echo $diff_in_hour
+      - last_commit_msg=$(git log -1 --pretty=%B)
+      - sha_value_id=$(git rev-parse HEAD)
+      - echo $last_commit_msg
+      - echo $sha_value_id
+      - if [ $diff_in_hour -gt 0 ]; then echo "There is no new commits. Exiting build."; exit 1; fi
+      - if [ "$last_commit_msg" == "deploy-execute" ]; then
+          echo "CodeBuild will do deploy and execute operation";
+          docker build -t ecs-poc .;
+          docker tag ecs-poc:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG;
+          echo "Pushing the Docker image to ECR Repository";
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG;
+          echo "Docker Push to ECR Repository Completed - $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG";
+          aws ecs run-task --cluster $CLUSTER_NAME --launch-type FARGATE --task-definition $TASK_DEFINITION --network-configuration "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2],securityGroups=[$SECURITY_GROUP]}";
+        elif [ "$last_commit_msg" == "deploy" ]; then
+          echo "CodeBuild will do deploy operation";
+          docker build -t ecs-poc .;
+          docker tag ecs-poc:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG;
+          echo "Pushing the Docker image to ECR Repository";
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG;
+          echo "Docker Push to ECR Repository Completed - $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPOSITORY_NAME:$IMAGE_TAG";
+        elif [ "$last_commit_msg" == "execute" ]; then
+          echo "CodeBuild will do execute operation";
+          aws ecs run-task --cluster $CLUSTER_NAME --launch-type FARGATE --task-definition $TASK_DEFINITION --network-configuration "awsvpcConfiguration={subnets=[$PRIVATE_SUBNET_1,$PRIVATE_SUBNET_2],securityGroups=[$SECURITY_GROUP]}";
+        else
+          echo "No matching condition found";
+        fi
+  post_build:
+    commands:
+      - echo "No post build action"
